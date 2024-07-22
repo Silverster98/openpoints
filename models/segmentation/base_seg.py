@@ -70,6 +70,25 @@ class BasePartSeg(BaseSeg):
             f = self.head(f)
         return f
 
+@MODELS.register_module()
+class BasePartSegWOCls(BaseSeg):
+    def __init__(self, encoder_args=None, decoder_args=None, cls_args=None, **kwargs):
+        super().__init__(encoder_args, decoder_args, cls_args, **kwargs)
+
+    def forward(self, p0, f0=None):
+        if hasattr(p0, 'keys'):
+            p0, f0 = p0['pos'], p0['x']
+        else:
+            if f0 is None:
+                f0 = p0.transpose(1, 2).contiguous()
+        p, f = self.encoder.forward_seg_feat(p0, f0)
+        if self.decoder is not None:
+            f = self.decoder(p, f).squeeze(-1)
+        elif isinstance(f, list):
+            f = f[-1]
+        if self.head is not None:
+            f = self.head(f)
+        return f
 
 @MODELS.register_module()
 class VariableSeg(BaseSeg):

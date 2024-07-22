@@ -1,1 +1,1 @@
-from .shapenetpart import ShapeNetPart, ShapeNetPartNormal
+from .shapenetpart import ShapeNetPart, ShapeNetPartNormal, ShapeNetPartAug

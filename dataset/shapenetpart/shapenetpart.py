@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 from ..build import DATASETS
 from openpoints.models.layers import fps, furthest_point_sample
+from trimesh import transform_points
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 
@@ -379,6 +380,114 @@ class ShapeNetPartCurve(Dataset):
     def __len__(self):
         return self.data.shape[0]
 
+@DATASETS.register_module()
+class ShapeNetPartAug(Dataset):
+    def __init__(self,
+                 data_root='data/ShapeNetPart/shapenetcore_partanno_segmentation_benchmark_v0_normal',
+                 num_points=2048,
+                 split='train',
+                 sampler='fps',
+                 transform=None,
+                 **kwargs
+                 ):
+        self.npoints = num_points
+        self.root = data_root
+        self.transform = transform
+        self.split = split
+        self.sampler = sampler
+
+        self.meta = os.path.join(self.root, 'processed', 'meta.json')
+        with open(self.meta, 'r') as f:
+            self.meta = json.load(f)
+        self.classes = self.meta['classes']
+        self.seg_num = self.meta['seg_num']
+        self.cls_parts = self.meta['cls_parts']
+        self.num_classes = sum(self.seg_num)
+        cls2parts = []
+        cls2partembed = torch.zeros(len(self.seg_num), sum(self.seg_num))
+        for i, cls in enumerate(self.classes):
+            idx = self.cls_parts[cls]
+            cls2parts.append(idx)
+            cls2partembed[i].scatter_(0, torch.LongTensor(idx), 1)
+        self.cls2parts = cls2parts
+        self.cls2partembed = cls2partembed
+        part2cls = {}
+        for cat in self.cls_parts.keys():
+            for label in self.cls_parts[cat]:
+                part2cls[label] = cat
+        self.part2cls = part2cls
+
+        ## load all points
+        self.points = {}
+        for f in sorted(os.listdir(os.path.join(self.root, 'processed', 'points'))):
+            with open(os.path.join(self.root, 'processed', 'points', f), 'r') as fp:
+                points = np.loadtxt(fp).astype(np.float32)
+            n = f.split('.')[0]
+            self.points[n] = points
+
+        ## load splits
+        train_files = sorted(os.listdir(os.path.join(self.root, 'processed', 'train')))
+        train_files = [os.path.join(self.root, 'processed', 'train', f) for f in train_files]
+        val_files = sorted(os.listdir(os.path.join(self.root, 'processed', 'val')))
+        val_files = [os.path.join(self.root, 'processed', 'val', f) for f in val_files]
+        test_files = sorted(os.listdir(os.path.join(self.root, 'processed', 'test')))
+        test_files = [os.path.join(self.root, 'processed', 'test', f) for f in test_files]
+
+        if self.split == 'trainval':
+            files = train_files + val_files
+        elif self.split == 'train':
+            files = train_files
+        elif self.split == 'val':
+            files = val_files
+        elif self.split == 'test':
+            files = test_files
+        else:
+            raise ValueError('Unknown split: %s' % self.split)
+    
+        scene = []
+        for f in files:
+            with open(f, 'r') as fp:
+                scene.append((os.path.basename(f).split('.')[0], json.load(fp)))
+        self.scene = scene
+
+    def __getitem__(self, index):
+        name, data = self.scene[index]
+        cls = self.classes.index(name.split('_')[0].lower())
+        cls = np.array([cls]).astype(np.int64)
+        nobjects = data['nobjects']
+        objects = data['objects']
+
+        scene = []
+        seg = []
+        for obj in objects:
+            inst_cat = obj['cat']
+            inst_id = obj['id']
+            trans_matrix = np.array(obj['trans_matrix']).astype(np.float64)
+
+            points = self.points[f"{inst_cat}_{inst_id}"].astype(np.float64)
+            points[:, :3] = transform_points(points[:, :3], trans_matrix)
+
+            scene.append(points[:, :3])
+            seg.append(points[:, 3])
+        scene = np.concatenate(scene, axis=0).astype(np.float32)
+        seg = np.concatenate(seg, axis=0).astype(np.int64)
+
+        if 'train' not in self.split:
+            np.random.seed(0)
+        choice = np.random.choice(len(seg), self.npoints, replace=True)
+        scene = scene[choice]
+        seg = seg[choice]
+
+        data = {'pos': scene,
+                'cls': cls,
+                'y': seg}
+
+        if self.transform is not None:
+            data = self.transform(data)
+        return data
+    
+    def __len__(self):
+        return len(self.scene)
 
 if __name__ == '__main__':
     train = ShapeNetPartNormal(num_points=2048, split='trainval')
